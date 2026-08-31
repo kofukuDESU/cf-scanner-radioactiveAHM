@@ -554,8 +554,8 @@ func fgen(f string) utls.ClientHelloID {
 		finger = utls.HelloEdge_Auto
 	case "chrome":
 		finger = utls.HelloChrome_Auto
-	case "360":
-		finger = utls.Hello360_Auto
+	case "unsafe":
+		finger = utls.Hellounsafe_Auto
 	case "ios":
 		finger = utls.HelloIOS_Auto
 	default:
