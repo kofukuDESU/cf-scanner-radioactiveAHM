@@ -10,6 +10,11 @@ Cloudflare scanner
 
 **This scanner can be used with any CDN, provided you have the necessary requirements, such as an IP list or domain list for scanning. By default, it is configured to target Cloudflare. [Please review the JSON configuration document below.](#configuration-parameters)**
 
+## Support (حمایت)
+
+- GRAM (TON): UQDb3zwscuviCuDl5EYkuqPni1gZ8XyESNJ51-9GdVW-hWZ3
+- USDT (TRC20): TSmDnaRy8cjuhPb6X7YANB82qBpARHi6af
+
 ## IRAN
 
 [اسکن akamai برای سایفون](/Akamai.md)
@@ -43,9 +48,9 @@ Cloudflare scanner
 - [x] Ping + Latency + Jitter + Download speed test
 - [x] UTLS
 - [x] Noise for HTTP/3
-- [x] UDP scan
 - [x] CSV format result
 - [x] Padding
+- [x] Fragment
 
 ## Build
 
@@ -76,9 +81,10 @@ go build -ldflags "-w -s"
 
 ```json
 {
- "LogErr": true,
+ "ProgressBar": true,   // Enable the progress bar. When enabled, logging is disabled. This option is available only for IPv4 scanning.
+ "Log": true,  // Enable Logging.
  "CSV": false, // CSV format result.
- "RandomScan": true,
+ "RandomScan": true, // Shuffle ip list. only for ipv4 scanning.
  "Hostname": "cp.cloudflare.com", // The target hostname or domain to scan. Use "{ip}" to use ip as hostname.
  "Ports": [], // If empty, defaults to port 443 for HTTPS and 80 for HTTP.
  "Path": "/", // The path to append to the hostname.
@@ -98,7 +104,7 @@ go build -ldflags "-w -s"
    "Size": "24-64" // Pinger packet size
  },
  "Goroutines": 16, // Number of concurrent goroutines for scanning.
- "Maxlatency": 1000, // Maximum acceptable latency (in milliseconds).
+ "Maxlatency": 2000, // Maximum acceptable latency (in milliseconds).
  "Jitter": {
    "Enable": true, // Enable jitter calculation.
    "MaxJitter": 50.0, // Maximum acceptable jitter.
@@ -118,7 +124,13 @@ go build -ldflags "-w -s"
     "Enable": true, // Enable UTLS fingerprint.
     "Fingerprint": "chrome", // Supported fingerprints are firefox, edge, chrome, 360 and ios.
     "TcpTimeout": 1000,
-    "TcpConnectAttempt": 1
+    "TcpConnectAttempt": 1,
+    "Fragment": {
+      "Enable": false, // Enable TLS client hello fragmenting.
+      "Length": "50-100", // Fragment size range in bytes. MUST be in range string format "A-B".
+      "Delay": "10-15", // Interval between fragments in milliseconds. MUST be in range string format "A-B". null=0.
+      "MaxSplit": null // Maximum number of splits. This limits how many pieces a single packet can be broken into. 0 means unlimited. MUST be in range string format "A-B". null=0.
+    }
    }
  },
  "HTTP/3": false, // Enable HTTP version 3.

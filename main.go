@@ -29,6 +29,7 @@ import (
 	"github.com/quic-go/quic-go/http3"
 
 	utls "github.com/refraction-networking/utls"
+	"github.com/schollz/progressbar/v3"
 )
 
 type DS struct {
@@ -60,11 +61,19 @@ type DownloadConfig struct {
 	Timeout            int    `json:"Timeout"`
 }
 
+type FragmentConfig struct {
+	Enable   bool   `json:"Enable"`
+	Length   string `json:"Length"`
+	Delay    string `json:"Delay"`
+	MaxSplit string `json:"MaxSplit"`
+}
+
 type UtlsConfig struct {
-	Enable            bool   `json:"Enable"`
-	Fingerprint       string `json:"Fingerprint"`
-	TcpTimeout        int64  `json:"TcpTimeout"`
-	TcpConnectAttempt int    `json:"TcpConnectAttempt"`
+	Enable            bool           `json:"Enable"`
+	Fingerprint       string         `json:"Fingerprint"`
+	TcpTimeout        int64          `json:"TcpTimeout"`
+	TcpConnectAttempt int            `json:"TcpConnectAttempt"`
+	Fragment          FragmentConfig `json:"Fragment"`
 }
 
 type TLSConfig struct {
@@ -90,7 +99,8 @@ type PingConfig struct {
 }
 
 type Conf struct {
-	LogErr             bool                `json:"LogErr"`
+	ProgressBar        bool                `json:"ProgressBar"`
+	Log                bool                `json:"Log"`
 	CSV                bool                `json:"CSV"`
 	RandomScan         bool                `json:"RandomScan"`
 	Hostname           string              `json:"Hostname"`
@@ -133,7 +143,7 @@ func main() {
 	// if exist != nil {
 	// 	e := GithubAPI("https://api.github.com/repos/compassvpn/cf-tools/releases/latest", "all_cf_v4.txt", "ipv4.txt")
 	// 	if e != nil {
-	// 		log.Println("Failed to download ipv4.txt: ", e, "\nFallback to ipv4_old.txt")
+	// log.Println("Failed to download ipv4.txt: ", e, "\nFallback to ipv4_old.txt")
 	// 		conf.IplistPath = "ipv4_old.txt"
 	// 	}
 	// }
@@ -142,7 +152,7 @@ func main() {
 	switch conf.IpVersion {
 	case 4:
 		// Generate IPs from CIDRs
-		color.Yellow("Generating IPs\n")
+		log.Println("Generating IPs")
 		GenIPs(&ips, conf.IplistPath, conf.IgnoreRange, conf.AllowRange)
 	case 6:
 		// Load CIDRs into list and generate random IPv6 during scan
@@ -172,12 +182,30 @@ func main() {
 		}
 	}
 
+	LengthMin, LengthMax := parseRange(conf.TLS.Utls.Fragment.Length)
+	IntervalMin, IntervalMax := parseRange(conf.TLS.Utls.Fragment.Delay)
+	MaxSplitMin, MaxSplitMax := parseRange(conf.TLS.Utls.Fragment.MaxSplit)
+	fragment := Fragment{
+		PacketsFrom: 0,
+		PacketsTo:   1,
+		LengthMin:   uint64(LengthMin),
+		LengthMax:   uint64(LengthMax),
+		IntervalMin: uint64(IntervalMin),
+		IntervalMax: uint64(IntervalMax),
+		MaxSplitMin: uint64(MaxSplitMin),
+		MaxSplitMax: uint64(MaxSplitMax),
+	}
+
 	file := FileMutex{
 		file: resultFile(conf.CSV),
 	}
 	defer file.Close()
 
-	LOG := conf.LogErr
+	LOG := conf.Log
+	if conf.ProgressBar {
+		LOG = false
+	}
+
 	if !conf.DomainScan.Enable {
 		ip_ch := make(chan string, conf.Goroutines)
 		var wg sync.WaitGroup
@@ -247,7 +275,7 @@ func main() {
 
 						s := time.Now()
 						if conf.TLS.Utls.Enable && conf.TLS.Enable && !conf.HTTP3 {
-							uclient, utlsE := utlsTransporter(&conf, fingerprint, conf.TLS.SNI, addr)
+							uclient, utlsE := utlsTransporter(&conf, fingerprint, conf.TLS.SNI, addr, &fragment)
 							if utlsE != nil {
 								if LOG {
 									color.Red("%s", utlsE)
@@ -271,7 +299,9 @@ func main() {
 						if slices.Contains(conf.ResponseStatusCode, respone.StatusCode) {
 							matchHeadersE := matchHeaders(respone.Header, conf.ResponseHeader)
 							if matchHeadersE != nil {
-								color.Red("%s", matchHeadersE)
+								if LOG {
+									color.Red("%s", matchHeadersE)
+								}
 								continue
 							}
 							// Calc jiiter
@@ -303,16 +333,20 @@ func main() {
 								}
 								jitter := Calc_jitter(latencies)
 								if jitter > conf.Jitter.MaxJitter {
-									color.Yellow("%s\t%s\t%d\t%f", addr, minrtt, latency, jitter)
+									if LOG {
+										color.Yellow("%s\t%s\t%d\t%f", addr, minrtt, latency, jitter)
+									}
 									continue
 								}
 								jitter_str = fmt.Sprintf("%f", jitter)
 							}
 							if conf.DownloadTest.Enable {
-								download_test = downloadTest(client, &conf, addr, fingerprint)
+								download_test = downloadTest(client, &conf, addr, fingerprint, &fragment)
 							}
 							rep := fmt.Sprintf("%-21s %-12s %d\t%s\t%s\n", addr.String(), minrtt, latency, jitter_str, download_test)
-							color.Green("%s", rep)
+							if LOG {
+								color.Green("%s", rep)
+							}
 							if conf.CSV {
 								file.Write(fmt.Sprintf("%s,%s,%d,%s,%s\n", addr.String(), minrtt, latency, jitter_str, download_test))
 							} else {
@@ -328,34 +362,36 @@ func main() {
 			})
 		}
 
-		if conf.RandomScan {
-			switch conf.IpVersion {
-			case 4:
+		switch conf.IpVersion {
+		case 4:
+			if conf.RandomScan {
 				rand.Shuffle(len(ips), func(i, j int) {
 					ips[i], ips[j] = ips[j], ips[i]
 				})
-				for _, ip := range ips {
-					ip_ch <- ip
-				}
-			case 6:
-				for {
-					ipv6, e := randomIPv6FromCIDR(strings.TrimSpace(ips[rand.Intn(len(ips))]))
-					if e != nil {
-						continue
-					}
-					ip_ch <- ipv6.String()
-				}
 			}
-		} else {
-			if conf.IpVersion != 4 {
-				log.Fatalln("linear method is only available for ipv4")
+
+			var pbar *progressbar.ProgressBar
+			if conf.ProgressBar {
+				pbar = progressbar.Default(int64(len(ips)))
 			}
+
 			for _, ip := range ips {
 				ip_ch <- ip
+				if conf.ProgressBar {
+					pbar.Add(1)
+				}
+			}
+		case 6:
+			for {
+				ipv6, e := randomIPv6FromCIDR(strings.TrimSpace(ips[rand.Intn(len(ips))]))
+				if e != nil {
+					continue
+				}
+				ip_ch <- ipv6.String()
 			}
 		}
-		close(ip_ch)
 
+		close(ip_ch)
 		wg.Wait()
 	} else {
 		// Domain Scan
@@ -371,14 +407,24 @@ func main() {
 			})
 		}
 
+		var pbar *progressbar.ProgressBar
+		if conf.ProgressBar {
+			pbar = progressbar.Default(int64(len(domains)))
+		}
+
 		var wg sync.WaitGroup
 		for domainsChunk := range slices.Chunk(domains, len(domains)/conf.Goroutines) {
 			wg.Go(func() {
 				for _, domain := range domainsChunk {
+					if conf.ProgressBar {
+						pbar.Add(1)
+					}
 					domain := strings.TrimSpace(domain)
 					ips, resolve_err := net.LookupIP(domain)
 					if resolve_err != nil {
-						color.HiYellow("%s", resolve_err)
+						if LOG {
+							color.HiYellow("%s", resolve_err)
+						}
 						continue
 					}
 
@@ -446,7 +492,7 @@ func main() {
 
 							s := time.Now()
 							if conf.TLS.Utls.Enable && conf.TLS.Enable && !conf.HTTP3 {
-								uclient, utlsE := utlsTransporter(&conf, fingerprint, sni, addr)
+								uclient, utlsE := utlsTransporter(&conf, fingerprint, sni, addr, &fragment)
 								if utlsE != nil {
 									if LOG {
 										color.Red("%s", utlsE)
@@ -470,7 +516,9 @@ func main() {
 							if slices.Contains(conf.ResponseStatusCode, respone.StatusCode) {
 								matchHeadersE := matchHeaders(respone.Header, conf.ResponseHeader)
 								if matchHeadersE != nil {
-									color.Red("%s(%s)\t%s", domain, ip, matchHeadersE)
+									if LOG {
+										color.Red("%s(%s)\t%s", domain, ip, matchHeadersE)
+									}
 									continue
 								}
 								// Calc jiiter
@@ -502,16 +550,20 @@ func main() {
 									}
 									jitter := Calc_jitter(latencies)
 									if jitter > conf.Jitter.MaxJitter {
-										color.Yellow("%s(%s)\t%s\t%d\t%f", domain, ip, minrtt, latency, jitter)
+										if LOG {
+											color.Yellow("%s(%s)\t%s\t%d\t%f", domain, ip, minrtt, latency, jitter)
+										}
 										continue
 									}
 									jitter_str = fmt.Sprintf("%f", jitter)
 								}
 								if conf.DownloadTest.Enable {
-									download_test = downloadTest(client, &conf, addr, fingerprint)
+									download_test = downloadTest(client, &conf, addr, fingerprint, &fragment)
 								}
 								rep := fmt.Sprintf("%s:\t%s\t%s\t%d\t%s\t%s\n", domain, ip, minrtt, latency, jitter_str, download_test)
-								color.Green("%s", rep)
+								if LOG {
+									color.Green("%s", rep)
+								}
 								if conf.CSV {
 									file.Write(fmt.Sprintf("%s:%s,%s,%d,%s,%s\n", domain, ip, minrtt, latency, jitter_str, download_test))
 								} else {
@@ -574,6 +626,24 @@ func RandomString(n string) string {
 	return base64.RawURLEncoding.EncodeToString(bytes)
 }
 
+func parseRange(r string) (a int, b int) {
+	if !strings.Contains(r, "-") {
+		return 0, 0
+	}
+
+	ab := strings.Split(r, "-")
+	a, a_err := strconv.Atoi(ab[0])
+	if a_err != nil {
+		log.Fatalln(a_err)
+	}
+	b, b_err := strconv.Atoi(ab[1])
+	if b_err != nil {
+		log.Fatalln(b_err)
+	}
+
+	return a, b
+}
+
 func randomRange(r string) int {
 	ab := strings.Split(r, "-")
 	a, a_err := strconv.Atoi(ab[0])
@@ -623,7 +693,7 @@ func h3transporter(conf *Conf, sni *string, qc *quic.Config) *http.Client {
 	}
 }
 
-func utlsTransporter(conf *Conf, fingerprint utls.ClientHelloID, sni string, addr net.TCPAddr) (*http.Client, error) {
+func utlsTransporter(conf *Conf, fingerprint utls.ClientHelloID, sni string, addr net.TCPAddr, fragment *Fragment) (*http.Client, error) {
 	dialer := &net.Dialer{Timeout: time.Millisecond * time.Duration(conf.TLS.Utls.TcpTimeout)}
 
 	var dialConn net.Conn
@@ -649,6 +719,14 @@ func utlsTransporter(conf *Conf, fingerprint utls.ClientHelloID, sni string, add
 	}
 	if sni != "" {
 		uTlsConf.ServerName = sni
+	}
+
+	if conf.TLS.Utls.Fragment.Enable {
+		dialConn = ConnWrap{
+			fragment: fragment,
+			conn:     dialConn,
+			count:    0,
+		}
 	}
 
 	uTlsConn := utls.UClient(dialConn, &uTlsConf, fingerprint)
